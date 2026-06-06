@@ -27,6 +27,7 @@ El problema afectaba a todas las páginas de Facebook conectadas.
 
 ## Servicio involucrado
 
+[service](https://github.com/dajosava/Ontime_Cocinas/blob/main/Hotfix/send_on_facebook_service.rb)
 ```bash
 /home/chatwoot/chatwoot/app/services/facebook/send_on_facebook_service.rb
 ```
