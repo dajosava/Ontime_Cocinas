@@ -14,9 +14,22 @@ El navegador deja de recibir mensajes nuevos en tiempo real. Al recargar la pág
 
 ## Causa raíz identificada (Junio 2026)
 
-**Redis huérfanos levantados por el usuario `manakinlook`** corriendo en `*:6379` (todas las interfaces), compitiendo con el Redis legítimo en `127.0.0.1:6379`.
+Los procesos Redis visibles bajo el usuario `manakinlook` en `*:6379` son en realidad **contenedores Docker legítimos** del stack:
 
-Chatwoot usa ActionCable sobre WebSocket con Redis como pub/sub backend. Cuando hay múltiples instancias de Redis en el mismo puerto, las conexiones de ActionCable pueden resolverse al Redis huérfano, que no tiene el estado de los canales, y los mensajes dejan de propagarse al cliente.
+| Contenedor | Imagen | Para |
+|---|---|---|
+| `n8n-redis-1` | `redis:6-alpine` | n8n |
+| `evo-redis-1` | `redis:latest` | Evolution API |
+
+Ambos tienen `"6379/tcp": null` — no están publicados al host, solo son accesibles dentro de la red Docker. No hay conflicto real con el Redis de Chatwoot.
+
+```bash
+# Confirmar que el puerto 6379 solo lo tiene el Redis legítimo
+ss -tlnp | grep 6379
+# Esperado: solo 127.0.0.1:6379 y ::1:6379
+```
+
+La causa real es **conexiones WebSocket que se acumulan hasta saturar Puma**. Al reiniciar, las conexiones colgadas se limpian y el problema desaparece hasta la próxima acumulación.
 
 ---
 
@@ -71,56 +84,18 @@ tail -50 /var/log/nginx/chatwoot_access_443.log
 
 ## Fix
 
-### Paso 1 — Matar los Redis huérfanos
+### Paso 1 — Reiniciar Chatwoot
+
+Chatwoot corre como servicios systemd:
 
 ```bash
-# Obtener los PIDs de los Redis huérfanos
-ps -aux | grep redis
-
-# Matar los que pertenecen a manakinlook (NO el de /usr/bin/redis-server)
-kill <PID1> <PID2>
-
-# Verificar que solo quede el legítimo
-ps -aux | grep redis
+systemctl restart chatwoot.target
+# Reinicia chatwoot-web.1.service y chatwoot-worker.1.service de una sola vez
 ```
 
-> **Nota:** Los huérfanos se vuelven a levantar solos. Ver sección "Solución permanente" abajo.
-
-### Paso 2 — Reiniciar Chatwoot
-
-```bash
-systemctl restart chatwoot.service
-
-# Si no tiene service, como usuario chatwoot:
-sudo -u chatwoot bash -c "cd /home/chatwoot/chatwoot && bundle exec rails restart"
-```
-
-### Paso 3 — Verificar que el navegador reconecta
+### Paso 2 — Verificar que el navegador reconecta
 
 Abrir DevTools → Network → filtrar por **WS**. Debe aparecer una conexión a `/cable` con estado `101 Switching Protocols`.
-
----
-
-## Solución permanente — Evitar que vuelvan los Redis huérfanos
-
-Identificar qué los levanta:
-
-```bash
-# Ver el proceso padre de los Redis huérfanos
-ps -p <PID_HORFANO> -o pid,ppid,user,cmd
-
-# Revisar crontab del usuario
-crontab -u manakinlook -l
-
-# Revisar servicios de systemd del usuario
-systemctl list-units --all | grep -i manakin
-
-# Revisar su home
-ls -la /home/manakinlook/
-cat /home/manakinlook/.bashrc
-```
-
-Una vez identificado el script o servicio que los levanta, deshabilitarlo o eliminar la línea que llama a `redis-server`.
 
 ---
 
@@ -143,24 +118,40 @@ keepalive 3200;
 
 ---
 
-## Watchdog (opcional)
+## Watchdog — Reinicio automático
 
-Si los reinicios manuales son frecuentes, agregar monitoreo automático:
+El endpoint `/` responde `200 OK` y es el health check correcto para Chatwoot. Instalarlo como cron:
 
 ```bash
-# /etc/cron.d/chatwoot-watchdog
-*/5 * * * * root curl -sf http://localhost:3000/auth/sign_in -o /dev/null || systemctl restart chatwoot.service
+cat > /etc/cron.d/chatwoot-watchdog << 'EOF'
+*/5 * * * * root curl -sf -o /dev/null http://localhost:3000/ || systemctl restart chatwoot.target
+EOF
+
+chmod 644 /etc/cron.d/chatwoot-watchdog
 ```
+
+Cada 5 minutos verifica que Puma responde. Si falla, reinicia ambos services (`chatwoot-web.1` y `chatwoot-worker.1`) automáticamente vía el target.
+
+**Endpoints probados:**
+
+| Endpoint | Resultado |
+|---|---|
+| `http://localhost:3000/` | `200 OK` ✅ — usar este |
+| `http://localhost:3000/health` | `404` ❌ |
+| `http://localhost:3000/auth/sign_in` | `500` ❌ |
 
 ---
 
 ## Configuración de referencia
 
-| Variable         | Valor                          |
-|------------------|-------------------------------|
-| `FRONTEND_URL`   | `https://app.ontime.chat`     |
-| `REDIS_URL`      | `redis://localhost:6379`      |
-| `FORCE_SSL`      | `false`                       |
-| Puerto Puma      | `3000`                        |
-| Nginx config     | `/etc/nginx/sites-enabled/nginx_chatwoot.conf` |
-| Redis legítimo   | `/usr/bin/redis-server 127.0.0.1:6379` (usuario `redis`) |
+| Variable | Valor |
+|---|---|
+| `FRONTEND_URL` | `https://app.ontime.chat` |
+| `REDIS_URL` | `redis://localhost:6379` |
+| `FORCE_SSL` | `false` |
+| Puerto Puma | `3000` |
+| Nginx config | `/etc/nginx/sites-enabled/nginx_chatwoot.conf` |
+| Redis legítimo | `/usr/bin/redis-server 127.0.0.1:6379` (usuario `redis`) |
+| Services | `chatwoot-web.1.service`, `chatwoot-worker.1.service`, `chatwoot.target` |
+| Redis Docker (n8n) | `n8n-redis-1` — solo red interna Docker, no publicado al host |
+| Redis Docker (Evo) | `evo-redis-1` — solo red interna Docker, no publicado al host |
