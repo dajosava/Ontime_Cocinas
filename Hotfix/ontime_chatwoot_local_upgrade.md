@@ -1,6 +1,6 @@
 # Actualización de Chatwoot self-hosted a v4.16.2- Ontime Cocinas - Mexico
 
-**Servidor:** vmi2621981
+
 **Fecha:** 27–28 de julio de 2026
 **Instalación:** nativa (no Docker), gestionada con `cwctl`
 **Versión previa:** v4.8.0 (con `cwctl` v3.5.0)
